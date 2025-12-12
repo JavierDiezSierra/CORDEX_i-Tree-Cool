@@ -4,8 +4,30 @@ import pandas as pd
 import os
 from typing import Dict, List
 
-# These libraries are required for the plotting functions to execute.
+def _decimal_to_hhmm(h):
+    if np.isnan(h):
+        return ""
+    h = float(h) % 24
+    hrs = int(h)
+    mins = int(round((h - hrs) * 60))
+    if mins == 60:
+        hrs = (hrs + 1) % 24
+        mins = 0
+    return f"{hrs:02d}:{mins:02d}"
 
+
+def _clean_series(series):
+    """
+    Convierte índice a float, ordena y elimina NaNs en valores.
+    Mantiene indexación decimal.
+    """
+    idx = pd.to_numeric(series.index, errors="coerce")
+    s = pd.Series(series.values, index=idx)
+    s = s[~s.index.isna()]          
+    s = s.sort_index()              
+    s = s.dropna()                  
+    return s
+    
 def plot_annual_cycles(
     annual_cycles: Dict[str, pd.Series],
     annual_cycles_mod: Dict[str, Dict[int, pd.Series]],
@@ -126,149 +148,196 @@ def plot_annual_cycles(
         print(f"\nERROR: Could not save the plot to {full_path}. Error: {e}")
 
 
-def plot_diurnal_cycles(
-    daily_cycles: Dict[str, pd.Series],
-    daily_cycles_mod: Dict[str, Dict[int, pd.Series]],
-    point_ids: List[int],
-    units: Dict[str, str],
-    plots_dir: str,
-    institution: str,
-    RCM: str,
-    model: str,
-    version: str,
-    ensemble: str
-) -> None:
+def plot_diurnal_cycles_summary(daily_cycles_mod, daily_cycles, variables_plot):
     """
-    Generates and saves a plot of the diurnal cycle (hourly aggregation) comparing
-    Observation data (OBS) with time series from model points (CORDEX).
-    
-    The plot shows the actual data points connected by a straight line, with 
-    zero values removed for precipitation variables to better represent the cycle.
-
-    Parameters:
-    ----------
-    daily_cycles : Dict[str, pd.Series]
-        Diurnal cycles (hourly mean) of observation data (OBS).
-        Key: Variable name, Value: Series with hour index (0-23).
-    daily_cycles_mod : Dict[str, Dict[int, pd.Series]]
-        Diurnal cycles (hourly mean) of model data (CORDEX).
-        Outer Key: Variable name. Inner Key: Point ID (int).
-        Value: Series with hour index (0-23 or sub-hourly/3-hourly).
-    point_ids : List[int]
-        List of model point IDs (e.g., [0, 1, 2, ...]).
-    units : Dict[str, str]
-        Dictionary mapping variable names to their units.
-    plots_dir : str
-        Directory where the plot will be saved.
-    institution, RCM, model, version, ensemble : str
-        Metadata used to name the output file.
+    Plot diurnal cycles with:
+      - One line per model
+      - One line for OBS
+      - Legend only once in first subplot
+      - Precipitation: replace 0 with NaN
     """
-    if not daily_cycles:
-        print("Warning: No OBS diurnal cycles to plot.")
-        return
 
-    # Check for limited observation data points
-    first_var_name = next(iter(daily_cycles))
-    num_obs_points = len(daily_cycles[first_var_name].index)
-    if num_obs_points < 24:
-        print(f"\n*** WARNING: OBS diurnal cycle data has only {num_obs_points} points (expected 24). The plot might look incomplete or flat. ***")
-        if num_obs_points <= 1:
-            print("This suggests the data might be a daily mean, not a cycle, which results in a straight line.\n")
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import pandas as pd
 
+    n_vars = len(variables_plot)
+    fig, axes = plt.subplots(n_vars, 1, figsize=(14, 5 * n_vars), sharex=False)
 
-    num_vars = len(daily_cycles)
-    # Create figure and subplots
-    fig_day, axes_day = plt.subplots(num_vars, 1, figsize=(16, 5 * num_vars), sharex=True)
+    if n_vars == 1:
+        axes = [axes]
 
-    # Update the plot title to reflect hourly aggregation
-    fig_day.suptitle("Diurnal Cycle (Hourly Aggregation) – Observations vs Model Points",
-                      fontsize=22, y=1.02)
+    # Model names for color assignment
+    model_names = list(daily_cycles_mod.keys())
+    colors = plt.cm.tab20(np.linspace(0, 1, len(model_names)))
 
-    # Ensure 'axes_day' is iterable even if only one variable is present
-    if num_vars == 1:
-        axes_day = [axes_day]
+    for i, var in enumerate(variables_plot):
+        ax = axes[i]
+        ax.set_title(f" ", fontsize=13)
 
-    # Define colors for the model points using a color map
-    colors = plt.cm.viridis(np.linspace(0, 1, len(point_ids)))
+        # --------------------------
+        # 1. PLOT OBSERVATIONS
+        # --------------------------
+        obs_series = daily_cycles.get(var, None)
+        if obs_series is not None:
+            obs = obs_series.copy()
 
-    for i, (name, obs_cycle) in enumerate(daily_cycles.items()):
-        ax = axes_day[i]
-        
-        # --- 1. OBS Data Plot ---
-        
-        # If it is precipitation, remove zeros (replace with NaN)
-        if "precip" in name.lower():
-            obs_cycle = obs_cycle.replace(0, np.nan)
-            
-        # Clean NaNs to ensure a continuous line in OBS
-        obs_cycle_clean = obs_cycle.dropna()
-        if obs_cycle_clean.empty:
-             continue
-             
-        # Plot observations as a line with markers
-        ax.plot(obs_cycle_clean.index, obs_cycle_clean.values,
-                 marker='o', color='black', linewidth=2, label="Observations")
+            # Replace zeros for precip
+            if "precip" in var.lower():
+                obs = obs.replace(0, np.nan)
 
-        # --- 2. MODEL Data Plot (Looping through all grid points) ---
-        for j, pid in enumerate(point_ids):
-            # Retrieve the model cycle for the current variable and point ID (pid)
-            mod_cycle = daily_cycles_mod.get(name, {}).get(pid, None)
+            obs_clean = obs.dropna()
 
-            if mod_cycle is None:
-                # Skip if no model data is available for this point/variable combination
+            if not obs_clean.empty:
+                ax.plot(
+                    obs_clean.index,
+                    obs_clean.values,
+                    color="black",
+                    linewidth=2,
+                    marker="o",
+                    label="Observations"
+                )
+
+        # --------------------------
+        # 2. PLOT MODELS
+        # --------------------------
+        legend_items = {}
+
+        for color, model_name in zip(colors, model_names):
+
+            if var not in daily_cycles_mod.get(model_name, {}):
                 continue
 
-            # If it is precipitation, remove zeros (replace with NaN)
-            if "precip" in name.lower():
-                mod_cycle = mod_cycle.replace(0, np.nan)
+            series = daily_cycles_mod[model_name][var].get("All_Points_Agg", None)
+            if series is None:
+                continue
 
-            # Clean NaNs to ensure the connection of model points
-            mod_cycle_clean = mod_cycle.dropna()
-            if mod_cycle_clean.empty:
-                 continue
-            
-            # 3. Plot the actual data points, connected with a solid line
-            ax.plot(mod_cycle_clean.index, mod_cycle_clean.values,
-                      marker='s', linestyle='-', linewidth=1.5, # Solid and thicker line
-                      color=colors[j],
-                      alpha=0.8,
-                      label=f"Model P{pid}") # Simplified label
+            mod = series.copy()
 
-            # Y-axis: Set the variable name and units
-            unit = units.get(name, 'Unit')
-            ax.set_ylabel(f"{name} ({unit})", fontsize=14)
-            ax.grid(True, linestyle='--', alpha=0.5)
-            
-            # Better legend handling to avoid duplicates
-            handles, labels = ax.get_legend_handles_labels()
-            uniq = dict(zip(labels, handles))
-            ax.legend(uniq.values(), uniq.keys(), fontsize=10, ncol=3, loc='upper right')
+            # Replace zeros for precipitation
+            if "precip" in var.lower():
+                mod = mod.replace(0, np.nan)
 
-    # --- X-axis formatting (Hours) ---
-    # Apply formatting to the last subplot only
-    axes_day[-1].set_xticks(range(0, 24, 2)) # Set ticks every 2 hours (0, 2, 4, ..., 22)
-    axes_day[-1].set_xticklabels(
-        [f"{h:02d}:00" for h in range(0, 24, 2)], # Clear labels HH:00
-        fontsize=12
-    )
-    axes_day[-1].set_xlabel("Hour (UTC)", fontsize=16)
-    axes_day[-1].set_xlim(-0.5, 23.5) # Ensure x-axis covers the full 0-23 range
+            mod_clean = mod.dropna()
+            if mod_clean.empty:
+                continue
 
-    # Final layout adjustment
-    plt.tight_layout(rect=[0, 0, 1, 0.96])
+            line = ax.plot(
+                mod_clean.index,
+                mod_clean.values,
+                linewidth=1.5,
+                marker="s",
+                alpha=0.9,
+                color=color,
+                label=model_name
+            )[0]
 
-    # Display the plot
+            legend_items[model_name] = line
+
+        ax.grid(True, linestyle="--", alpha=0.4)
+        ax.set_ylabel(var)
+
+        # -------------------------------------------------
+        # ONLY FIRST SUBPLOT SHOWS THE LEGEND
+        # -------------------------------------------------
+        if i == 0:
+            # Unique legend: OBS + models
+            handles = []
+            labels = []
+
+            # Add OBS if it exists
+            if obs_series is not None:
+                handles.append(ax.lines[0])
+                labels.append("Observations")
+
+            # Add models
+            for model_name, line in legend_items.items():
+                handles.append(line)
+                labels.append(model_name)
+
+            ax.legend(handles, labels, ncol=3, fontsize=9)
+
+    plt.tight_layout()
     plt.show()
+    return fig
 
-    # Create directory if it doesn't exist
-    os.makedirs(plots_dir, exist_ok=True)
 
-    # File name based on metadata (changed to 'diurnal_cycle')
-    filename = f"diurnal_cycle_all_points_{institution}_{RCM}_{model}_{version}_{ensemble}.png"
-    full_path = os.path.join(plots_dir, filename)
+def plot_annual_cycles_summary(
+    annual_cycles_mod_by_model: Dict[str, Dict[str, Dict[str, any]]],
+    annual_cycles_obs: Dict[str, any],
+    variables: Dict[str, str],
+    figsize: tuple = (10, 4)
+):
+    """
+    Plot annual cycles for all variables in vertically stacked subplots.
 
-    try:
-        fig_day.savefig(full_path, dpi=300)
-        print(f"\nSUCCESS: Diurnal cycle plot saved to {full_path}")
-    except Exception as e:
-        print(f"\nERROR: Could not save the plot to {full_path}. Error: {e}")
+    Compares:
+        - Observations
+        - Each model (each CSV file is one model)
+    """
+
+    var_names = list(variables.keys())
+    n_vars = len(var_names)
+
+    if n_vars == 0:
+        raise ValueError("Variable list is empty. Nothing to plot.")
+
+    # Create figure with one subplot per variable
+    fig, axes = plt.subplots(
+        n_vars, 1,
+        figsize=(figsize[0], figsize[1] * n_vars),
+        sharex=True
+    )
+
+    if n_vars == 1:
+        axes = [axes]
+
+    # ---------------------------------------------------------------------
+    # MAIN LOOP
+    # ---------------------------------------------------------------------
+    for i, var_name in enumerate(var_names):
+        ax = axes[i]
+
+        # Plot observations
+        obs_series = annual_cycles_obs[var_name]
+        ax.plot(
+            obs_series.index,
+            obs_series.values,
+            label="Observations",
+            linewidth=2,
+            color="black"
+        )
+
+        # Plot each model
+        for model_name, model_dict in annual_cycles_mod_by_model.items():
+
+            if var_name not in model_dict:
+                continue
+            if "All_Points_Agg" not in model_dict[var_name]:
+                continue
+
+            model_series = model_dict[var_name]["All_Points_Agg"]
+
+            ax.plot(
+                model_series.index,
+                model_series.values,
+                label=model_name,
+                linewidth=1.5,
+                alpha=0.8,
+            )
+
+        ax.set_ylabel(var_name)
+        ax.set_title(f" ", fontsize=12)
+        ax.grid(True, alpha=0.3)
+
+        if i == n_vars - 1:
+            ax.set_xlabel("Month")
+            ax.set_xticks(range(1, 13))
+
+        # Legend only once — same as daily format
+        if i == 0:
+            ax.legend(ncol=3, fontsize=9)
+
+    plt.tight_layout()
+    return fig
+
