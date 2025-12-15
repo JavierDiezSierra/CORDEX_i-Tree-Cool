@@ -117,7 +117,7 @@ def plot_annual_cycles(
         unit = units.get(name, 'Unit')
         ax.set_ylabel(f"{name} ({unit})", fontsize=14)
         ax.grid(True, linestyle='--', alpha=0.5)
-        # Legend in the upper right corner with 3 columns
+        # Legend in the upper right corner with 2 columns
         ax.legend(fontsize=10, ncol=3, loc='upper right')
 
     # X-axis configuration (Common for all)
@@ -129,7 +129,7 @@ def plot_annual_cycles(
     axes[-1].set_xlabel("Month", fontsize=16)
 
     # Final layout adjustment
-    plt.tight_layout(rect=[0, 0, 1, 0.96]) # Adjusts for the main title
+    plt.tight_layout() # Adjusts for the main title
 
     # Display the plot
     plt.show()
@@ -255,7 +255,7 @@ def plot_diurnal_cycles_summary(daily_cycles_mod, daily_cycles, variables_plot):
                 handles.append(line)
                 labels.append(model_name)
 
-            ax.legend(handles, labels, ncol=3, fontsize=9)
+            ax.legend(handles, labels, ncol=2, fontsize=8)
 
     plt.tight_layout()
     plt.show()
@@ -336,7 +336,7 @@ def plot_annual_cycles_summary(
 
         # Legend only once — same as daily format
         if i == 0:
-            ax.legend(ncol=3, fontsize=9)
+            ax.legend(ncol=2, fontsize=8)
 
     plt.tight_layout()
     return fig

@@ -997,8 +997,7 @@ def compute_annual_and_daily_cycles(
         if len(parts) < 6:
             raise ValueError(f"Filename does not match expected pattern: {base}")
 
-        model_name = parts[4]     # extract {model}
-
+        model_name = "_".join(parts[1:6])  # institution_RCM_ensemble_model_version
         print(f"\nProcessing model: {model_name}")
         df_temp = pd.read_csv(f, index_col=0)
 
