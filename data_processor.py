@@ -1,7 +1,7 @@
 import os
 import glob
 import warnings
-from typing import Dict, List, Union, Callable, Tuple
+from typing import Dict, List, Union, Callable, Tuple, Any
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -11,6 +11,7 @@ from sklearn.neighbors import KDTree
 
 from pvlib.solarposition import get_solarposition
 from pvlib.irradiance import get_extra_radiation as E0_pvlib
+import pandas as pd
 
     
 def select_non_urban_neighbors(
@@ -660,10 +661,30 @@ def process_cordex_to_obs_like(df_final: pd.DataFrame,
     # 1) Build/repair datetime index
     # ---------------------------
     if 'YYYYMMDD' in df.columns and 'HH:MM:SS' in df.columns:
+    
+        # ---------------------------------------------------
+        # FIX INVALID DATES (Option 3)
+        # Example: replace 20000230 → 20000229 (leap year)
+        # ---------------------------------------------------
+        invalid_mask = (
+            pd.to_datetime(
+                df['YYYYMMDD'].astype(str) + ' ' + df['HH:MM:SS'].astype(str),
+                format='%Y%m%d %H:%M:%S',
+                errors='coerce'
+            ).isna()
+        )
+    
+        # Replace invalid dates with a valid one
+        df.loc[invalid_mask, 'YYYYMMDD'] = 20000229
+        # ---------------------------------------------------
+    
+        # Now build datetime safely
         time_series = df['YYYYMMDD'].astype(str) + ' ' + df['HH:MM:SS'].astype(str)
         new_index = pd.to_datetime(time_series, format='%Y%m%d %H:%M:%S', errors='coerce')
+    
         df.index = new_index
         df = df.drop(columns=['YYYYMMDD', 'HH:MM:SS'])
+
     else:
         # If index isn't datetime, try to coerce
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -739,7 +760,7 @@ def process_cordex_to_obs_like(df_final: pd.DataFrame,
                 mean_val = series.mean(skipna=True)
                 if mean_val < 0.1:
                     # treat as mm/s; convert to mm/h
-                    series_mm_per_h = series * 3.6/3
+                    series_mm_per_h = series * 3.6
                 else:
                     # already mm/h or comparable; keep as-is
                     series_mm_per_h = series
@@ -929,3 +950,121 @@ def process_cordex_to_obs_like(df_final: pd.DataFrame,
 
     print("[INFO] process_cordex_to_obs_like: complete.")
     return df_obs_like
+
+def compute_annual_and_daily_cycles(
+    data_dir: str,
+    variables_obs: Dict[str, str],
+    filename_pattern: str = "df_*.csv"
+) -> Tuple[
+    Dict[str, Dict[str, Dict[str, pd.Series]]],
+    Dict[str, Dict[str, Dict[str, pd.Series]]]
+]:
+    """
+    Same behavior as before, but now cycles are computed PER MODEL.
+    """
+
+    # ------------------------------------------------------------
+    # 1. Locate files
+    # ------------------------------------------------------------
+    search_path = os.path.join(data_dir, filename_pattern)
+    files = glob.glob(search_path)
+
+    if not files:
+        raise FileNotFoundError(f"No files found matching pattern: {search_path}")
+
+    print(f"Found {len(files)} CSV files.")
+
+    # Output dictionaries:
+    # annual_cycles_mod_by_model[model][variable]["All_Points_Agg"]
+    # daily_cycles_mod_by_model[model][variable]["All_Points_Agg"]
+    annual_cycles_mod_by_model = {}
+    daily_cycles_mod_by_model = {}
+
+    # ------------------------------------------------------------
+    # 2. PROCESS EACH MODEL SEPARATELY
+    # ------------------------------------------------------------
+    for f in files:
+
+        # ------------------------------------------------------------------
+        # Extract model name from CSV filename
+        # Input format df_{institution}_{RCM}_{ensemble}_{model}_{version}.csv
+        # ------------------------------------------------------------------
+        base = os.path.basename(f)
+        name_no_ext = base.replace(".csv", "")
+        parts = name_no_ext.split("_")
+
+        # df, institution, RCM, ensemble, model, version
+        if len(parts) < 6:
+            raise ValueError(f"Filename does not match expected pattern: {base}")
+
+        model_name = parts[4]     # extract {model}
+
+        print(f"\nProcessing model: {model_name}")
+        df_temp = pd.read_csv(f, index_col=0)
+
+        # Fix time column naming
+        if "Time_Index_Aux.1" in df_temp.columns:
+            df_temp.rename(columns={"Time_Index_Aux.1": "Time_Index_Aux"}, inplace=True)
+        elif "Time_Index_Aux.0" in df_temp.columns:
+            df_temp.rename(columns={"Time_Index_Aux.0": "Time_Index_Aux"}, inplace=True)
+
+        df_temp["Time_Index_Aux"] = pd.to_datetime(
+            df_temp["Time_Index_Aux"], errors="coerce"
+        )
+
+        # Time of day
+        df_temp["Time_of_Day"] = df_temp["Time_Index_Aux"].dt.strftime('%H:%M')
+
+        # Allocate dictionaries for this model
+        annual_cycles_mod_by_model[model_name] = {name: {} for name in variables_obs.keys()}
+        daily_cycles_mod_by_model[model_name] = {name: {} for name in variables_obs.keys()}
+
+        # ------------------------------------------------------------
+        # Compute cycles per variable FOR THIS MODEL ONLY
+        # ------------------------------------------------------------
+        for name, obs_col in variables_obs.items():
+
+            # P0–P8 columns
+            model_cols = [f"{obs_col}_P{pid}" for pid in range(9)]
+            model_cols_present = [c for c in model_cols if c in df_temp.columns]
+
+            if not model_cols_present:
+                print(f"Warning: {model_name}: No model columns for {name} ({obs_col})")
+                continue
+
+            # Aggregate P0–P8
+            if name == "Precipitation Rate":
+                aggregated_series = df_temp[model_cols_present].mean(axis=1)
+            else:
+                aggregated_series = df_temp[model_cols_present].mean(axis=1)
+
+            key = "All_Points_Agg"
+
+            # ----- Annual cycle -----
+            month_index = df_temp["Time_Index_Aux"].dt.month
+
+            if name == "Precipitation Rate":
+                annual_cycles_mod_by_model[model_name][name][key] = \
+                    aggregated_series.groupby(month_index).mean()
+            else:
+                annual_cycles_mod_by_model[model_name][name][key] = \
+                    aggregated_series.groupby(month_index).mean()
+
+            # ----- Daily cycle -----
+            if name == "Precipitation Rate":
+                daily_cycle_raw = aggregated_series.groupby(df_temp["Time_of_Day"]).mean()
+            else:
+                daily_cycle_raw = aggregated_series.groupby(df_temp["Time_of_Day"]).mean()
+
+            # HH:MM -> decimal hour
+            new_index = daily_cycle_raw.index.map(
+                lambda t: int(t.split(":")[0]) + int(t.split(":")[1]) / 60.0
+            )
+
+            daily_cycles_mod_by_model[model_name][name][key] = pd.Series(
+                daily_cycle_raw.values, index=new_index
+            )
+
+    print("\nFinished computing cycles PER MODEL.\n")
+    return annual_cycles_mod_by_model, daily_cycles_mod_by_model
+
